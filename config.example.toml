@@ -1,0 +1,12 @@
+# Copy to ~/.config/m-dlp/config.toml, or use --config ./config.example.toml.
+# CLI arguments override these defaults. Paths are relative to this file.
+output = "./downloads"
+jobs = 3             # concurrent batch tasks; 1 runs tasks sequentially
+download-limit = "10M" # bytes/second; K/M/G use powers of 1024
+upload-limit = "1M"   # 0 means unlimited, not disabled uploads
+metadata-timeout = 120
+stall-timeout = 300   # 0 means wait indefinitely
+probe-seconds = 10
+no-cache = false
+# cache-dir = "./cache"
+# queue-db = "./state/queue.sqlite3" # persistent tasks, separate from download cache
