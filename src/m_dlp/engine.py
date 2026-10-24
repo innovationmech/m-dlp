@@ -2,6 +2,7 @@
 
 import math
 import os
+import socket
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -13,13 +14,23 @@ import libtorrent as lt
 from .cache import CacheStore
 from .diagnostics import DiagnosticSnapshot, NetworkObservations, file_coverage
 from .limits import validate_rate
+from .network import validate_interface_name
 from .source import TorrentSource
 
 SESSION_SETTINGS = {
     "listen_interfaces": "0.0.0.0:0,[::]:0",
     "user_agent": "m-dlp/0.1.0",
+    # A successful tracker response may contain no useful peers. Query all
+    # trackers supplied by the source instead of stopping at the first tier.
+    "announce_to_all_tiers": True,
+    "announce_to_all_trackers": True,
+    # The default proportional TCP/uTP balancer can throttle fast TCP peers
+    # based on slow uTP peers, even with unlimited session/torrent rates.
+    # Keep both transports, but let explicit rate limits govern throughput.
+    "mixed_mode_algorithm": int(lt.bandwidth_mixed_algo_t.prefer_tcp),
 }
 CHECKPOINT_INTERVAL = 30
+PROGRESS_INTERVAL = 0.2
 
 
 class DownloadError(RuntimeError):
@@ -74,11 +85,16 @@ class MagnetDownload:
         use_cache: bool = True,
         download_limit: int = 0,
         upload_limit: int = 0,
+        network_interface: str | None = None,
         cancelled: Callable[[], bool] | None = None,
     ):
         self._cancelled = cancelled
         self.download_limit = validate_rate(download_limit)
         self.upload_limit = validate_rate(upload_limit)
+        self.network_interface = (
+            validate_interface_name(network_interface) if network_interface is not None else None
+        )
+        self._interface_index: int | None = None
         self._source = TorrentSource(source)
         self._params = self._source.parameters()
         self.cache = CacheStore(cache_dir, enabled=use_cache)
@@ -103,9 +119,19 @@ class MagnetDownload:
         self._temporary = TemporaryDirectory(prefix="m-dlp-")
         try:
             categories = lt.alert.category_t
+            interface_settings = {}
+            if self.network_interface is not None:
+                # Device names bind both peer connections and UDP sockets used
+                # by uTP, DHT and trackers. A wildcard listener also opens
+                # sockets on physical interfaces when a VPN is active.
+                interface_settings = {
+                    "outgoing_interfaces": self.network_interface,
+                    "listen_interfaces": f"{self.network_interface}:0",
+                }
             self.session = lt.session(
                 {
                     **SESSION_SETTINGS,
+                    **interface_settings,
                     "download_rate_limit": self.download_limit,
                     "upload_rate_limit": self.upload_limit,
                     "ignore_limits_on_local_network": False,
@@ -143,6 +169,23 @@ class MagnetDownload:
     def _check_cancelled(self) -> None:
         if self._cancelled is not None and self._cancelled():
             raise DownloadCancelled("任务已取消，已下载的数据会保留。")
+        self._check_network_interface()
+
+    def _check_network_interface(self) -> None:
+        if self.network_interface is None:
+            return
+        try:
+            index = socket.if_nametoindex(self.network_interface)
+        except OSError:
+            index = None
+        if index is None or (self._interface_index is not None and index != self._interface_index):
+            if self.session is not None:
+                self.session.pause()
+            raise DownloadError(
+                f"网络接口 {self.network_interface!r} 不可用或已更换，已停止下载；"
+                "已下载的数据会保留，请检查接口后重试。"
+            )
+        self._interface_index = index
 
     def close(self) -> None:
         if self.session is not None:
@@ -206,7 +249,9 @@ class MagnetDownload:
             ):
                 raise DownloadError(alert.message())
         if check_errors and check_status and self.handle is not None and self.handle.is_valid():
-            status = self.handle.status()
+            # Ordinary polling needs scalar counters only. The default flags
+            # also copy every piece bitfield into Python lists.
+            status = self.handle.status(0)
             if status.errc.value():
                 raise DownloadError(status.errc.message())
         return alerts
@@ -280,7 +325,7 @@ class MagnetDownload:
         while True:
             self._request_dht_stats()
             self._alerts()
-            status = self.handle.status()
+            status = self.handle.status(0)
             if status.has_metadata:
                 break
             if on_status is not None:
@@ -386,6 +431,21 @@ class MagnetDownload:
         params.renamed_files = {}
         for name in ("trackers", "tracker_tiers", "url_seeds", "http_seeds", "peers", "dht_nodes"):
             setattr(params, name, getattr(fresh, name))
+        # Removing the metadata torrent discards its discovered peer list.
+        # Carry live outgoing endpoints into the payload torrent so it can
+        # reconnect immediately, even if discovery is slow or unavailable.
+        # Incoming connections expose ephemeral ports, not listening ports.
+        # Resume-file peers remain excluded, just like cached network sources.
+        params.peers = list(
+            dict.fromkeys(
+                [*fresh.peers]
+                + [
+                    peer.ip
+                    for peer in self.handle.get_peer_info()
+                    if peer.flags & lt.peer_info.outgoing_connection
+                ]
+            )
+        )
         params.piece_priorities = []
         priorities = [4 if index + 1 in selected else 0 for index in range(self._info.num_files())]
         params.file_priorities = priorities
@@ -411,13 +471,24 @@ class MagnetDownload:
         total = sum(file.size for file in chosen)
         last_activity = time.monotonic()
         previous_payload = -1
+        next_progress = 0.0
         checking_states = {lt.torrent_status.checking_files, lt.torrent_status.checking_resume_data}
         while True:
+            # Alerts can wake wait_for_alert immediately. Consume errors and
+            # cancellation promptly without turning each notification into
+            # synchronous status/file-progress calls on the network thread.
+            self._alerts(check_status=False)
+            now = time.monotonic()
+            if now < next_progress:
+                self.session.wait_for_alert(max(1, math.ceil((next_progress - now) * 1000)))
+                continue
+            next_progress = now + PROGRESS_INTERVAL
             self._request_dht_stats()
-            self._alerts()
             if time.monotonic() - self._last_checkpoint >= CHECKPOINT_INTERVAL:
                 self._request_checkpoint()
-            status = self.handle.status()
+            status = self.handle.status(0)
+            if status.errc.value():
+                raise DownloadError(status.errc.message())
             # Only hash-verified pieces count toward completion, including
             # torrents whose selected file shares pieces with skipped files.
             progress = self.handle.file_progress(lt.torrent_handle.piece_granularity)

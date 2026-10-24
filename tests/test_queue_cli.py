@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from threading import Event
 
 import pytest
 from test_cli import invoke
@@ -64,6 +65,45 @@ def test_queue_add_list_show_control_are_durable_and_do_not_download(tmp_path):
         assert records()[0]["state"] == state
     assert invoke("queue", "resume", str(task["id"])).returncode == 2
     assert invoke("queue", "show", "9999").returncode == 2
+
+
+def test_queue_saves_network_interface_for_replay(tmp_path, monkeypatch):
+    from m_dlp import cli, queue_cli
+
+    config = tmp_path / "interface.toml"
+    config.write_text('network-interface = "utun8"\n')
+    result = invoke("queue", "add", MAGNET, "--all", "--config", str(config))
+    assert result.returncode == 0, result.stderr
+    assert records()[0]["options"]["network_interface"] == "utun8"
+    config.write_text('network-interface = "utun9"\n')
+    monkeypatch.setenv("M_DLP_CONFIG", str(config))
+    with QueueStore() as store:
+        record = store.get(1)
+    received = []
+
+    def worker(task, cancelled, emit, *, args):
+        received.append(args.network_interface)
+
+    monkeypatch.setattr(cli, "_batch_worker", worker)
+    queue_cli._worker(record, Event(), lambda event: None)
+    assert received == ["utun8"]
+
+
+def test_queue_legacy_record_has_no_interface_binding(tmp_path, monkeypatch):
+    from m_dlp import cli, queue_cli
+    from m_dlp.batch import BatchTask
+
+    task = BatchTask(1, 1, MAGNET, "a" * 40, tmp_path / "downloads")
+    with QueueStore() as store:
+        record = store.add([(task, {"cache_dir": str(tmp_path / "cache")}, None)])[0]
+    received = []
+
+    def worker(task, cancelled, emit, *, args):
+        received.append(args.network_interface)
+
+    monkeypatch.setattr(cli, "_batch_worker", worker)
+    queue_cli._worker(record, Event(), lambda event: None)
+    assert received == [None]
 
 
 @pytest.mark.parametrize("extra", [[], ["--list"], ["--diagnose"], ["--export-torrent", "out"]])

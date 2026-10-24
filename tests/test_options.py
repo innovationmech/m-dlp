@@ -17,6 +17,67 @@ def test_limits_accept_size_units_and_zero():
     assert args.upload_limit == 0
 
 
+def test_network_interface_default_and_config_precedence(tmp_path, monkeypatch):
+    assert parse().network_interface is None
+    config = tmp_path / "interface.toml"
+    config.write_text('network-interface = "utun8"\n')
+    assert parse("--config", str(config)).network_interface == "utun8"
+    assert (
+        parse("--config", str(config), "--network-interface", "utun9").network_interface == "utun9"
+    )
+    monkeypatch.setenv("M_DLP_CONFIG", str(config))
+    assert parse("--no-config").network_interface is None
+
+
+@pytest.mark.parametrize("value", ["", " ", "utun8,en0", "utun8:0", "utun8\x00", "utun8\n"])
+def test_invalid_network_interface_cli_fails(value, capsys):
+    with pytest.raises(SystemExit) as exc:
+        parse("--network-interface", value)
+    assert exc.value.code == 2
+    error = capsys.readouterr().err
+    assert "--network-interface" in error
+    assert "unrecognized arguments" not in error
+
+
+@pytest.mark.parametrize("value", ['""', '"utun8,en0"', '"utun8:0"', "42", "1.5", "true", "[]"])
+def test_invalid_network_interface_config_fails(tmp_path, value, capsys):
+    config = tmp_path / "interface.toml"
+    config.write_text(f"network-interface = {value}\n")
+    with pytest.raises(SystemExit) as exc:
+        parse("--config", str(config))
+    assert exc.value.code == 2
+    error = capsys.readouterr().err
+    assert "interface.toml" in error
+    assert "不支持的配置项" not in error
+
+
+@pytest.mark.parametrize("mode", ["single", "batch", "queue-selection", "queue-run"])
+def test_missing_network_interface_stops_cli_before_network(tmp_path, monkeypatch, capsys, mode):
+    from m_dlp import engine
+
+    interface = "m-dlp-interface-that-does-not-exist"
+
+    def no_session(*args, **kwargs):
+        pytest.fail("An unavailable bound interface must fail before creating network sockets")
+
+    monkeypatch.setattr(engine.lt, "session", no_session)
+    binding = ["--network-interface", interface]
+    if mode == "single":
+        argv = [MAGNET, "--list", *binding]
+    elif mode == "batch":
+        batch = tmp_path / "magnets.txt"
+        batch.write_text(MAGNET + "\n")
+        argv = ["--batch-file", str(batch), "--list", *binding]
+    elif mode == "queue-selection":
+        monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+        argv = ["queue", "add", MAGNET, "--interactive", *binding]
+    else:
+        assert cli.run(["queue", "add", MAGNET, "--all", *binding]) == 0
+        argv = ["queue", "run"]
+    assert cli.run(argv) == 1
+    assert interface in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("value", ["-1", "nan", "2G", "0.1B", "1Mbps"])
 def test_invalid_limits_fail(value):
     with pytest.raises(SystemExit) as exc:

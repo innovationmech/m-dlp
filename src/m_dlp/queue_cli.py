@@ -45,6 +45,7 @@ OPTION_KEYS = (
     "recheck",
     "download_limit",
     "upload_limit",
+    "network_interface",
     "metadata_timeout",
     "stall_timeout",
 )
@@ -60,7 +61,7 @@ def _saved_options(args):
 def _worker(record, cancelled, emit):
     from .cli import _batch_worker
 
-    args = argparse.Namespace(**record.options)
+    args = argparse.Namespace(**{"network_interface": None, **record.options})
     args.cache_dir = Path(args.cache_dir)
     if record.torrent is None:
         return _batch_worker(record.task, cancelled, emit, args=args)
@@ -138,6 +139,7 @@ def _interactive_source(args, console, errors):
         use_cache=not args.no_cache,
         download_limit=args.download_limit,
         upload_limit=args.upload_limit,
+        network_interface=args.network_interface,
     )
     try:
         with download:

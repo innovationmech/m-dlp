@@ -15,7 +15,9 @@ LOCAL_SETTINGS = {
     "enable_upnp": False,
     "enable_natpmp": False,
     "enable_outgoing_utp": False,
-    "enable_incoming_utp": False,
+    # Real CLI subprocesses use uTP for tracker-discovered peers. Accept it
+    # on loopback so they do not stall waiting for an unrelated TCP fallback.
+    "enable_incoming_utp": True,
     "allow_multiple_connections_per_ip": True,
     "close_redundant_connections": False,
 }
@@ -78,7 +80,7 @@ def seed(tmp_path, request):
 def local_engine(monkeypatch):
     from m_dlp import engine
 
-    monkeypatch.setattr(engine, "SESSION_SETTINGS", LOCAL_SETTINGS)
+    monkeypatch.setattr(engine, "SESSION_SETTINGS", {**engine.SESSION_SETTINGS, **LOCAL_SETTINGS})
     return engine
 
 

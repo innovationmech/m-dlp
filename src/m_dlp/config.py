@@ -42,6 +42,13 @@ def load_defaults(
                 if type(value) is not bool:
                     raise ValueError("no-cache 必须是 true 或 false")
                 converted = value
+            elif key == "network-interface":
+                if not isinstance(value, str):
+                    raise ValueError("network-interface 必须是非空接口名称字符串")
+                try:
+                    converted = converters[key](value)
+                except (ValueError, argparse.ArgumentTypeError) as exc:
+                    raise ValueError(f"{key}：{exc}") from exc
             elif key in {"output", "cache-dir", "queue-db"}:
                 if not isinstance(value, str) or not value.strip():
                     raise ValueError(f"{key} 必须是非空路径字符串")

@@ -3,6 +3,7 @@ import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 import libtorrent as lt
 import pytest
@@ -38,6 +39,56 @@ def seeded_torrent(seed):
     seed.torrent_path.write_bytes(lt.bencode(data))
     try:
         yield seed.torrent_path
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+@pytest.mark.parametrize("same_tier", [False, True])
+def test_discovers_peers_from_all_supplied_trackers(seed, local_engine, tmp_path, same_tier):
+    # Both trackers succeed, but only one has a seed. A successful empty
+    # response must not prevent querying the other supplied tracker.
+    announced = set()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            path = urlsplit(self.path).path
+            announced.add(path)
+            peers = (
+                socket.inet_aton("127.0.0.1") + struct.pack("!H", seed.session.listen_port())
+                if path == "/announce/seed"
+                else b""
+            )
+            body = lt.bencode({b"interval": 3600, b"peers": peers})
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except ConnectionError:
+                pass
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    empty, seeded = f"{base}/announce/empty".encode(), f"{base}/announce/seed".encode()
+    data = lt.bdecode(seed.torrent_path.read_bytes())
+    data[b"announce-list"] = [[empty, seeded]] if same_tier else [[empty], [seeded]]
+    seed.torrent_path.write_bytes(lt.bencode(data))
+    target = tmp_path / "downloads"
+    try:
+        with MagnetDownload(str(seed.torrent_path), use_cache=False) as download:
+            download.resolve(timeout=1)
+            download.probe(1)
+            assert announced == {"/announce/empty", "/announce/seed"}
+            assert download.handle.status().total_payload_download == 0
+            download.download({2}, target, stall_timeout=5)
+        assert (target / "sample/second.bin").read_bytes() == seed.contents["sample/second.bin"]
     finally:
         server.shutdown()
         server.server_close()

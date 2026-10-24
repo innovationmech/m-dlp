@@ -19,6 +19,7 @@ from rich.text import Text
 from . import __version__
 from .config import load_defaults
 from .limits import parse_rate
+from .network import validate_interface_name
 from .selection import filter_files, parse_selection, parse_size
 
 
@@ -49,6 +50,13 @@ def _size(value: str) -> int:
 def _rate(value: str) -> int:
     try:
         return parse_rate(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _network_interface(value: str) -> str:
+    try:
+        return validate_interface_name(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
@@ -194,6 +202,12 @@ def _parser() -> argparse.ArgumentParser:
         help="上传上限，单位字节/秒，例如 1M；0 表示不限速（默认）",
     )
     parser.add_argument(
+        "--network-interface",
+        type=_network_interface,
+        metavar="NAME",
+        help="绑定指定网络接口（例如 VPN 接口 utun8）；接口消失时停止下载",
+    )
+    parser.add_argument(
         "--metadata-timeout",
         type=_positive_seconds,
         default=120.0,
@@ -221,6 +235,7 @@ def _parse_args(argv: list[str] | None = None, parser=None):
         "no-cache": bool,
         "download-limit": parse_rate,
         "upload-limit": parse_rate,
+        "network-interface": validate_interface_name,
         "metadata-timeout": _positive_seconds,
         "stall-timeout": _nonnegative_seconds,
         "probe-seconds": _positive_seconds,
@@ -437,6 +452,7 @@ def _batch_worker(task, cancelled, emit, *, args):
             use_cache=not args.no_cache,
             download_limit=args.download_limit,
             upload_limit=args.upload_limit,
+            network_interface=args.network_interface,
             cancelled=cancelled.is_set,
         )
         with download:
@@ -459,7 +475,8 @@ def _batch_worker(task, cancelled, emit, *, args):
                         recheck=args.recheck,
                     )
             except DownloadError:
-                diagnostic = download.diagnostics(download._selected or None)
+                if download.handle is not None and download.handle.is_valid():
+                    diagnostic = download.diagnostics(download._selected or None)
                 raise
     except DownloadCancelled as exc:
         state, error = "cancelled", str(exc)
@@ -657,6 +674,7 @@ def run(argv: list[str] | None = None, *, enqueue_only=False) -> int:
             use_cache=not args.no_cache,
             download_limit=args.download_limit,
             upload_limit=args.upload_limit,
+            network_interface=args.network_interface,
         ) as download:
             try:
                 _execute(args, console, download)

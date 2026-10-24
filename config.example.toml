@@ -4,6 +4,7 @@ output = "./downloads"
 jobs = 3             # concurrent batch tasks; 1 runs tasks sequentially
 download-limit = "10M" # bytes/second; K/M/G use powers of 1024
 upload-limit = "1M"   # 0 means unlimited, not disabled uploads
+# network-interface = "utun8" # optional; use the current VPN interface name
 metadata-timeout = 120
 stall-timeout = 300   # 0 means wait indefinitely
 probe-seconds = 10
