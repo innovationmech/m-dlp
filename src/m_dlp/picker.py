@@ -147,3 +147,6 @@ class SelectionModel:
             self.selected.update(self.matches)
         else:
             self.selected.difference_update(self.matches)
+
+    def invert_matches(self):
+        self.selected.symmetric_difference_update(self.matches)

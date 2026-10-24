@@ -88,7 +88,10 @@ def test_empty_queue_safe_text_and_database_contention_are_visible(tmp_path):
             assert panel.current.state == "pending"
 
 
-@pytest.mark.parametrize("key,code", [("q", 0), ("\x03", 130), ("\x04", 130), (None, 130)])
+@pytest.mark.parametrize(
+    "key,code",
+    [("q", 0), ("\x03", 130), ("\x04", 130), (None, 130), ("?\x03", 130), ("\r\x04", 130)],
+)
 def test_owned_runner_exit_joins_workers_and_preserves_progress(tmp_path, key, code):
     async def run():
         stopped_cleanly = Event()

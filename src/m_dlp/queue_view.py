@@ -64,6 +64,9 @@ class QueueView:
     def clear_selection(self):
         self.selected.clear()
 
+    def invert_visible(self):
+        self.selected.symmetric_difference_update(row.id for row in self.rows)
+
     def targets(self):
         if self.selected:
             return sorted(self.selected)
